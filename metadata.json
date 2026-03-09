@@ -1,0 +1,7 @@
+{
+  "name": "QR Risk Scanner",
+  "description": "AI-powered QR code security scanner to detect phishing and malicious links before you open them.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
