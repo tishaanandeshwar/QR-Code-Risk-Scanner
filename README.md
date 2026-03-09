@@ -16,12 +16,6 @@ The application uses the device camera to instantly detect and read QR codes.
 
 After scanning a QR code, the extracted URL is analyzed using Google Gemini AI to determine if the link is safe or potentially dangerous.
 
-### Audio Feedback
-
-The system provides sound alerts to quickly notify users about the result:
-
-* Safe link → positive sound
-* Suspicious link → warning sound
 
 ### Privacy Focused
 
