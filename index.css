@@ -1,0 +1,334 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import jsQR from 'jsqr';
+import { ShieldAlert, ShieldCheck, RefreshCw, ExternalLink, AlertTriangle, ScanLine, History, Zap, ZapOff, Keyboard, Trash2 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { analyzeUrl, RiskAnalysis } from './services/aiService';
+import { cn } from './lib/utils';
+import { audioService } from './lib/audio';
+
+interface HistoryItem {
+  url: string;
+  riskLevel: string;
+  score: number;
+  timestamp: number;
+}
+
+export default function App() {
+  const [scanning, setScanning] = useState(true);
+  const [scannedUrl, setScannedUrl] = useState<string | null>(null);
+  const [analysis, setAnalysis] = useState<RiskAnalysis | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+  const [manualInput, setManualInput] = useState('');
+  const [showManual, setShowManual] = useState(false);
+  
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const requestRef = useRef<number | null>(null);
+
+  const tick = useCallback(() => {
+    if (videoRef.current?.readyState === videoRef.current?.HAVE_ENOUGH_DATA && canvasRef.current) {
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      
+      if (context) {
+        canvas.height = video.videoHeight;
+        canvas.width = video.videoWidth;
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code) return handleScan(code.data);
+      }
+    }
+    requestRef.current = requestAnimationFrame(tick);
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    if (videoRef.current?.srcObject) {
+      (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+      videoRef.current.srcObject = null;
+    }
+    if (requestRef.current) cancelAnimationFrame(requestRef.current);
+  }, []);
+
+  const startCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.setAttribute('playsinline', 'true');
+        await videoRef.current.play().catch(() => {});
+        requestRef.current = requestAnimationFrame(tick);
+      }
+      setError(null);
+    } catch (err: any) {
+      console.error("Camera error:", err);
+      if (err.name === 'NotAllowedError') {
+        setError('Camera access denied. Please enable camera permissions in your browser settings.');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setError('No camera detected on this device.');
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        setError('Camera is already in use by another application.');
+      } else {
+        setError('Could not start camera. Please ensure you are using a secure (HTTPS) connection.');
+      }
+    }
+  }, [tick]);
+
+  const toggleTorch = async () => {
+    const stream = videoRef.current?.srcObject as MediaStream;
+    const track = stream?.getVideoTracks()[0];
+    if (track) {
+      try {
+        const capabilities = track.getCapabilities() as any;
+        if (capabilities.torch) {
+          await track.applyConstraints({
+            advanced: [{ torch: !torchOn }]
+          } as any);
+          setTorchOn(!torchOn);
+        }
+      } catch (e) {
+        console.error("Torch not supported", e);
+      }
+    }
+  };
+
+  const handleScan = async (url: string) => {
+    if (navigator.vibrate) navigator.vibrate(50);
+    audioService.playScan();
+    setScanning(false);
+    setScannedUrl(url);
+    setLoading(true);
+    stopCamera();
+    try {
+      const result = await analyzeUrl(url);
+      setAnalysis(result);
+      
+      const newItem: HistoryItem = {
+        url,
+        riskLevel: result.riskLevel,
+        score: result.score,
+        timestamp: Date.now()
+      };
+      const updatedHistory = [newItem, ...history].slice(0, 10);
+      setHistory(updatedHistory);
+      localStorage.setItem('scan_history', JSON.stringify(updatedHistory));
+
+      if (result.riskLevel === 'SAFE') audioService.playSafe();
+      else if (result.riskLevel === 'SUSPICIOUS') audioService.playSuspicious();
+      else audioService.playDangerous();
+    } catch (err: any) {
+      setError(err.message || 'Analysis failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const saved = localStorage.getItem('scan_history');
+    if (saved) setHistory(JSON.parse(saved));
+    startCamera();
+    return stopCamera;
+  }, [startCamera, stopCamera]);
+
+  const isSafe = analysis?.riskLevel === 'SAFE';
+  const accentColor = isSafe ? 'text-green-500' : 'text-red-500';
+  const bgColor = isSafe ? 'bg-green-500' : 'bg-red-500';
+  const borderColor = isSafe ? 'border-green-500/20' : 'border-red-500/20';
+
+  return (
+    <div className="min-h-screen bg-black text-white font-mono selection:bg-white selection:text-black">
+      <header className="fixed top-0 left-0 right-0 z-50 p-6 border-b border-white/10 bg-black/80 backdrop-blur-md">
+        <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-white flex items-center justify-center rounded-sm">
+              <ScanLine className="text-black w-5 h-5" />
+            </div>
+            <h1 className="text-xl font-bold tracking-tighter uppercase">QR Risk Scanner</h1>
+          </div>
+          <button 
+            onClick={() => setShowHistory(!showHistory)}
+            className="p-2 hover:bg-white/10 rounded-full transition-colors"
+          >
+            <History className={cn("w-5 h-5", showHistory ? "text-white" : "text-white/50")} />
+          </button>
+        </div>
+      </header>
+
+      <main className="pt-32 pb-12 px-6 max-w-4xl mx-auto">
+        <AnimatePresence mode="wait">
+          {showHistory ? (
+            <motion.div key="history" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs uppercase tracking-[0.3em] font-bold opacity-50">Recent Scans</h2>
+                <button 
+                  onClick={() => { setHistory([]); localStorage.removeItem('scan_history'); }}
+                  className="text-[10px] uppercase tracking-widest text-red-500 hover:underline flex items-center gap-1"
+                >
+                  <Trash2 className="w-3 h-3" /> Clear All
+                </button>
+              </div>
+              {history.length === 0 ? (
+                <div className="py-20 text-center border border-dashed border-white/10 rounded-xl">
+                  <p className="text-xs opacity-30 uppercase tracking-widest">No history yet</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {history.map((item, i) => (
+                    <div key={i} className="p-4 border border-white/5 bg-zinc-900/50 rounded-lg flex items-center justify-between gap-4">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[10px] opacity-30 mb-1">{new Date(item.timestamp).toLocaleString()}</div>
+                        <div className="text-sm font-bold truncate opacity-80">{item.url}</div>
+                      </div>
+                      <div className={cn(
+                        "px-2 py-1 rounded text-[9px] font-bold uppercase tracking-tighter",
+                        item.riskLevel === 'SAFE' ? "bg-green-500/20 text-green-500" : "bg-red-500/20 text-red-500"
+                      )}>
+                        {item.riskLevel} ({item.score})
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <button 
+                onClick={() => setShowHistory(false)}
+                className="w-full py-4 border border-white/10 text-[10px] uppercase tracking-[0.3em] font-bold hover:bg-white hover:text-black transition-all"
+              >
+                Back to Scanner
+              </button>
+            </motion.div>
+          ) : scanning ? (
+            <div className="space-y-8">
+              <motion.div key="scanner" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95 }} className="relative aspect-square max-w-md mx-auto overflow-hidden rounded-2xl border border-white/20 bg-zinc-900">
+                <video ref={videoRef} className="w-full h-full object-cover grayscale" />
+                <canvas ref={canvasRef} className="hidden" />
+                <div className="absolute inset-0 pointer-events-none">
+                  <div className="absolute inset-12 border-2 border-white/30 rounded-lg">
+                    <motion.div animate={{ top: ['0%', '100%', '0%'] }} transition={{ duration: 3, repeat: Infinity, ease: "linear" }} className="absolute left-0 right-0 h-0.5 bg-white shadow-[0_0_15px_rgba(255,255,255,0.8)]" />
+                  </div>
+                  <p className="absolute bottom-6 left-0 right-0 text-center text-xs uppercase tracking-widest font-bold text-white/70 animate-pulse">Scanning...</p>
+                </div>
+                
+                <div className="absolute top-4 right-4 flex flex-col gap-2">
+                  <button onClick={toggleTorch} className="w-10 h-10 bg-black/50 backdrop-blur-md rounded-full flex items-center justify-center border border-white/10 hover:bg-white/20 transition-colors">
+                    {torchOn ? <ZapOff className="w-5 h-5 text-yellow-400" /> : <Zap className="w-5 h-5" />}
+                  </button>
+                  <button onClick={() => setShowManual(!showManual)} className="w-10 h-10 bg-black/50 backdrop-blur-md rounded-full flex items-center justify-center border border-white/10 hover:bg-white/20 transition-colors">
+                    <Keyboard className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {error && (
+                  <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center p-8 text-center">
+                    <AlertTriangle className="w-12 h-12 text-white mb-4" />
+                    <p className="text-sm mb-6">{error}</p>
+                    <button onClick={() => window.location.reload()} className="px-6 py-2 bg-white text-black text-xs font-bold uppercase tracking-widest hover:bg-zinc-200">Retry</button>
+                  </div>
+                )}
+              </motion.div>
+
+              <AnimatePresence>
+                {showManual && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="max-w-md mx-auto overflow-hidden">
+                    <div className="p-4 border border-white/10 bg-zinc-900/50 rounded-xl flex gap-2">
+                      <input 
+                        type="url" 
+                        placeholder="Paste URL here..." 
+                        value={manualInput}
+                        onChange={(e) => setManualInput(e.target.value)}
+                        className="flex-1 bg-transparent border-none outline-none text-sm font-bold"
+                      />
+                      <button 
+                        onClick={() => manualInput && handleScan(manualInput)}
+                        className="px-4 py-2 bg-white text-black text-[10px] font-bold uppercase tracking-widest rounded"
+                      >
+                        Analyze
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          ) : (
+            <motion.div key="result" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="space-y-8">
+              <div className="p-6 border border-white/10 bg-zinc-900/50 rounded-xl">
+                <div className="text-[10px] uppercase tracking-widest opacity-50 mb-2">URL</div>
+                <div className="text-lg break-all font-bold text-white/90">{scannedUrl}</div>
+              </div>
+
+              {error && (
+                <div className="p-6 border border-red-500/20 bg-red-500/5 rounded-xl flex flex-col items-center text-center">
+                  <AlertTriangle className="w-8 h-8 text-red-500 mb-3" />
+                  <p className="text-sm text-red-200 mb-4">{error}</p>
+                  <button onClick={() => { setScanning(true); setError(null); startCamera(); }} className="px-6 py-2 bg-white text-black text-[10px] font-bold uppercase tracking-widest">Try Again</button>
+                </div>
+              )}
+
+              {loading ? (
+                <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                  <RefreshCw className="w-8 h-8 animate-spin opacity-50" />
+                  <p className="text-xs uppercase tracking-widest opacity-50">Analyzing...</p>
+                </div>
+              ) : analysis && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                  <div className="md:col-span-1 flex flex-col items-center justify-center p-8 border border-white/10 rounded-xl bg-zinc-900/30">
+                    <div className="relative w-32 h-32 flex items-center justify-center mb-4">
+                      <svg className="w-full h-full -rotate-90">
+                        <circle cx="64" cy="64" r="58" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="8" />
+                        <motion.circle cx="64" cy="64" r="58" fill="none" stroke={isSafe ? '#22c55e' : '#ef4444'} strokeWidth="8" strokeDasharray="364" initial={{ strokeDashoffset: 364 }} animate={{ strokeDashoffset: 364 - (364 * analysis.score) / 100 }} transition={{ duration: 0.8, ease: "easeOut" }} />
+                      </svg>
+                      <div className="absolute inset-0 flex flex-col items-center justify-center">
+                        <span className={cn("text-4xl font-bold tracking-tighter", accentColor)}>{analysis.score}</span>
+                        <span className="text-[10px] uppercase tracking-widest opacity-50">Risk</span>
+                      </div>
+                    </div>
+                    <div className={cn("px-4 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest text-white", bgColor)}>
+                      {isSafe ? 'SAFE' : 'UNSAFE'}
+                    </div>
+                  </div>
+
+                  <div className="md:col-span-2 space-y-6">
+                    <div>
+                      <h3 className={cn("text-xs uppercase tracking-widest mb-3 flex items-center gap-2", accentColor)}>
+                        {isSafe ? <ShieldCheck className="w-4 h-4" /> : <ShieldAlert className="w-4 h-4" />} Assessment
+                      </h3>
+                      <p className="text-sm leading-relaxed text-white/80">{analysis.summary}</p>
+                    </div>
+                    <div className={cn("p-4 border rounded-lg", borderColor, isSafe ? "bg-green-500/5" : "bg-red-500/5")}>
+                      <h3 className="text-[10px] uppercase tracking-widest opacity-50 mb-2">Recommendation</h3>
+                      <p className="text-sm font-bold">{analysis.recommendation}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-col sm:flex-row gap-4 pt-8">
+                <button onClick={() => { setScannedUrl(null); setAnalysis(null); setScanning(true); setError(null); startCamera(); }} className="flex-1 px-8 py-4 border border-white/20 hover:bg-white hover:text-black transition-all text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2">
+                  <RefreshCw className="w-4 h-4" /> Scan Again
+                </button>
+                {scannedUrl && (
+                  <a href={scannedUrl} target="_blank" rel="noopener noreferrer" className={cn("flex-1 px-8 py-4 transition-all text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2 text-white", isSafe ? "bg-green-600 hover:bg-green-700" : "bg-red-600 hover:bg-red-700")}>
+                    <ExternalLink className="w-4 h-4" /> Open Link
+                  </a>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
+
+      <footer className="fixed bottom-0 left-0 right-0 p-6 text-center pointer-events-none">
+        <p className="text-[9px] uppercase tracking-[0.4em] opacity-30">Encrypted Verification • AI Analysis • Privacy Focused</p>
+      </footer>
+    </div>
+  );
+}
